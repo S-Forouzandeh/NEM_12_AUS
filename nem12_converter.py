@@ -473,7 +473,12 @@ def process_csv(file_path: str, logger: logging.Logger) -> List[Dict[str, Any]]:
         else:
             # Not in NEM12 format, likely time series data
             logger.info(f"File {file_path} appears to be in time series format. Converting to NEM12.")
-            return process_time_series_csv(df, file_path, logger)
+            
+            # Use improved NMI extraction
+            nmi = extract_and_validate_nmi(file_path, df, logger)
+            logger.info(f"Using NMI for processing: {nmi}")
+            
+            return process_time_series_csv(df, file_path, logger, nmi)
     except Exception as e:
         logger.error(f"Error processing CSV {file_path}: {e}", exc_info=True)
         return []
@@ -491,25 +496,17 @@ def process_excel(file_path: str, logger: logging.Logger) -> List[Dict[str, Any]
     try:
         xls = pd.ExcelFile(file_path)
         
-        # Enhanced NMI extraction from filename
-        filename = os.path.basename(file_path)
-        logger.info(f"Processing Excel file: {file_path}")
+        # Read a sample to help with NMI extraction
+        sample_df = None
+        try:
+            sample_df = pd.read_excel(xls, sheet_name=0, header=None, nrows=30)
+            logger.info(f"Read sample data from first sheet for NMI extraction")
+        except Exception as e:
+            logger.warning(f"Could not read sample data from {file_path}: {e}")
         
-        # First try the standard NMI pattern (10 digits)
-        nmi_match = re.search(r'\b[0-9]{10}\b', filename)
-        nmi = nmi_match.group(0) if nmi_match else None
-        
-        # If not found, try other patterns
-        if not nmi:
-            # Try NXXXXXXXX format (letter followed by digits)
-            alt_nmi_match = re.search(r'\b[A-Za-z][0-9]{9,10}\b', filename)
-            if alt_nmi_match:
-                nmi = alt_nmi_match.group(0)
-            else:
-                # Use a default NMI that will be replaced if found in the data
-                nmi = "UNKNOWN_NMI"
-        
-        logger.info(f"Initial NMI from filename: {nmi}")
+        # Use improved NMI extraction function
+        nmi = extract_and_validate_nmi(file_path, sample_df, logger)
+        logger.info(f"Initial NMI for processing: {nmi}")
         
         # Specifically handle Input_3.XLSX - add hardcoded pattern matching
         if "Input_3" in file_path:
@@ -520,7 +517,7 @@ def process_excel(file_path: str, logger: logging.Logger) -> List[Dict[str, Any]
         results = []
         all_time_series_data = []
         extracted_nmi = None  # To store NMI extracted from data
-        
+                
         # First, try a quick scan through all sheets to find the NMI
         for sheet_name in xls.sheet_names:
             try:
@@ -647,6 +644,94 @@ def process_excel(file_path: str, logger: logging.Logger) -> List[Dict[str, Any]
     except Exception as e:
         logger.error(f"Error processing Excel {file_path}: {e}", exc_info=True)
         return []
+
+def extract_and_validate_nmi(file_path: str, df: pd.DataFrame, logger: logging.Logger) -> str:
+    """Extract and validate the NMI from the file name or data content.
+    
+    Args:
+        file_path: Path to the source file
+        df: DataFrame containing the data
+        logger: Logger instance
+        
+    Returns:
+        Validated NMI string
+    """
+    logger.info(f"Extracting NMI from file: {file_path}")
+    
+    # Initialize with a default (will be overridden if a real NMI is found)
+    extracted_nmi = "UNKNOWN_NMI"
+    
+    # Method 1: Extract from filename (most common scenario)
+    filename = os.path.basename(file_path)
+    logger.info(f"Analyzing filename: {filename}")
+    
+    # Pattern 1: Look for standard 10-digit NMI
+    nmi_match = re.search(r'\b(\d{10})\b', filename)
+    if nmi_match:
+        potential_nmi = nmi_match.group(1)
+        logger.info(f"Found 10-digit NMI in filename: {potential_nmi}")
+        return potential_nmi
+    
+    # Pattern 2: Look for NMI with optional prefix (e.g., NMI4123456789 or NMIL1234567890)
+    nmi_prefix_match = re.search(r'\b(?:NMI)?([A-Za-z]?\d{9,10})\b', filename)
+    if nmi_prefix_match:
+        potential_nmi = nmi_prefix_match.group(1)
+        logger.info(f"Found NMI with possible prefix in filename: {potential_nmi}")
+        return potential_nmi
+    
+    # Pattern 3: First segment of filename if it looks like an NMI
+    name_parts = re.split(r'[ _\-.]', filename)
+    for part in name_parts:
+        # Check if part matches NMI pattern (10 digits or letter+9-10 digits)
+        if re.match(r'^\d{10}$', part) or re.match(r'^[A-Za-z]\d{9,10}$', part):
+            logger.info(f"Found potential NMI in filename segment: {part}")
+            return part
+    
+    # Method 2: Search in the data content
+    if df is not None and not df.empty:
+        # Search entire DataFrame for NMI patterns
+        all_text = ' '.join([str(x) for x in df.values.flatten() if pd.notna(x)])
+        
+        # Look for text labeled as NMI
+        nmi_labeled_matches = re.findall(r'(?:NMI|nmi)[:\s]*([A-Za-z]?\d{9,10})', all_text)
+        if nmi_labeled_matches:
+            logger.info(f"Found NMI labeled in data content: {nmi_labeled_matches[0]}")
+            return nmi_labeled_matches[0]
+        
+        # Look for standalone NMI patterns in the text
+        nmi_pattern_matches = re.findall(r'\b(\d{10})\b', all_text)
+        if nmi_pattern_matches:
+            # Use the most common 10-digit number as it's likely the NMI
+            from collections import Counter
+            nmi_counts = Counter(nmi_pattern_matches)
+            most_common_nmi = nmi_counts.most_common(1)[0][0]
+            logger.info(f"Found most common 10-digit NMI pattern in data: {most_common_nmi}")
+            return most_common_nmi
+    
+    # Method 3: Use input file path for clues (if all else fails)
+    path_parts = os.path.normpath(file_path).split(os.sep)
+    for part in path_parts:
+        if re.match(r'^\d{10}$', part) or re.match(r'^[A-Za-z]\d{9,10}$', part):
+            logger.info(f"Found potential NMI in directory path: {part}")
+            return part
+    
+    # If we reached here, use the file name itself as a fallback (better than UNKNOWN_NMI)
+    # Remove file extension and common prefixes/suffixes
+    clean_name = os.path.splitext(filename)[0]
+    clean_name = re.sub(r'(?i)_(data|reading|interval|export|file|csv|xlsx?|output).*$', '', clean_name)
+    
+    if re.match(r'^[A-Za-z0-9]{4,12}$', clean_name):  # Reasonable length for an identifier
+        logger.info(f"Using cleaned filename as NMI identifier: {clean_name}")
+        return clean_name
+    
+    # Fall back to using timestamp + default suffix as last resort
+    if extracted_nmi == "UNKNOWN_NMI":
+        timestamp = datetime.now().strftime('%y%m%d%H%M')
+        extracted_nmi = f"AUTO{timestamp}"
+        logger.info(f"No valid NMI found, using auto-generated NMI: {extracted_nmi}")
+    
+    return extracted_nmi
+
 
 def is_valid_time_format(time_str: str) -> bool:
     """Check if a string looks like a valid time format.
@@ -892,10 +977,21 @@ def create_nem12_structure(data: List[Dict[str, Any]], nmi: str,
         logger.warning(f"No data provided to create NEM12 structure for NMI: {nmi}")
         return None
     
-    # Check if data contains a different NMI than what was provided
-    if data[0]['nmi'] != nmi:
-        nmi = data[0]['nmi']
-        logger.info(f"Using NMI from data: {nmi}")
+    # Validate NMI
+    if nmi == "UNKNOWN_NMI":
+        # Last chance to extract from data
+        if data and 'nmi' in data[0] and data[0]['nmi'] != "UNKNOWN_NMI":
+            nmi = data[0]['nmi']
+            logger.info(f"Using NMI from data: {nmi}")
+        else:
+            # If still unknown, use timestamp-based identifier
+            timestamp = datetime.now().strftime('%y%m%d%H%M')
+            nmi = f"AUTO{timestamp}"
+            logger.info(f"No valid NMI found, using auto-generated NMI: {nmi}")
+    
+    # Update all records with the finalized NMI
+    for record in data:
+        record['nmi'] = nmi
         
     # IMPORTANT: Add this validation step before processing
     data = validate_and_clean_readings(data, nmi, logger)
@@ -1953,6 +2049,98 @@ def validate_and_clean_readings(time_series_data: List[Dict[str, Any]], nmi: str
     
     logger.info(f"Cleaned data now has {len(cleaned_data)} records (was {len(time_series_data)})")
     return cleaned_data
+
+
+
+def extract_and_validate_nmi(file_path: str, df: pd.DataFrame, logger: logging.Logger) -> str:
+    """Extract and validate the NMI from the file name or data content.
+    
+    Args:
+        file_path: Path to the source file
+        df: DataFrame containing the data
+        logger: Logger instance
+        
+    Returns:
+        Validated NMI string
+    """
+    logger.info(f"Extracting NMI from file: {file_path}")
+    
+    # Initialize with a default (will be overridden if a real NMI is found)
+    extracted_nmi = "UNKNOWN_NMI"
+    
+    # Method 1: Extract from filename (most common scenario)
+    filename = os.path.basename(file_path)
+    logger.info(f"Analyzing filename: {filename}")
+    
+    # Pattern 1: Look for standard 10-digit NMI
+    nmi_match = re.search(r'\b(\d{10})\b', filename)
+    if nmi_match:
+        potential_nmi = nmi_match.group(1)
+        logger.info(f"Found 10-digit NMI in filename: {potential_nmi}")
+        return potential_nmi
+    
+    # Pattern 2: Look for NMI with optional prefix (e.g., NMI4123456789 or NMIL1234567890)
+    nmi_prefix_match = re.search(r'\b(?:NMI)?([A-Za-z]?\d{9,10})\b', filename)
+    if nmi_prefix_match:
+        potential_nmi = nmi_prefix_match.group(1)
+        logger.info(f"Found NMI with possible prefix in filename: {potential_nmi}")
+        return potential_nmi
+    
+    # Pattern 3: First segment of filename if it looks like an NMI
+    name_parts = re.split(r'[ _\-.]', filename)
+    for part in name_parts:
+        # Check if part matches NMI pattern (10 digits or letter+9-10 digits)
+        if re.match(r'^\d{10}$', part) or re.match(r'^[A-Za-z]\d{9,10}$', part):
+            logger.info(f"Found potential NMI in filename segment: {part}")
+            return part
+    
+    # Method 2: Search in the data content
+    if df is not None and not df.empty:
+        # Search entire DataFrame for NMI patterns
+        all_text = ' '.join([str(x) for x in df.values.flatten() if pd.notna(x)])
+        
+        # Look for text labeled as NMI
+        nmi_labeled_matches = re.findall(r'(?:NMI|nmi)[:\s]*([A-Za-z]?\d{9,10})', all_text)
+        if nmi_labeled_matches:
+            logger.info(f"Found NMI labeled in data content: {nmi_labeled_matches[0]}")
+            return nmi_labeled_matches[0]
+        
+        # Look for standalone NMI patterns in the text
+        nmi_pattern_matches = re.findall(r'\b(\d{10})\b', all_text)
+        if nmi_pattern_matches:
+            # Use the most common 10-digit number as it's likely the NMI
+            from collections import Counter
+            nmi_counts = Counter(nmi_pattern_matches)
+            most_common_nmi = nmi_counts.most_common(1)[0][0]
+            logger.info(f"Found most common 10-digit NMI pattern in data: {most_common_nmi}")
+            return most_common_nmi
+    
+    # Method 3: Use input file path for clues (if all else fails)
+    path_parts = os.path.normpath(file_path).split(os.sep)
+    for part in path_parts:
+        if re.match(r'^\d{10}$', part) or re.match(r'^[A-Za-z]\d{9,10}$', part):
+            logger.info(f"Found potential NMI in directory path: {part}")
+            return part
+    
+    # If we reached here, use the file name itself as a fallback (better than UNKNOWN_NMI)
+    # Remove file extension and common prefixes/suffixes
+    clean_name = os.path.splitext(filename)[0]
+    clean_name = re.sub(r'(?i)_(data|reading|interval|export|file|csv|xlsx?|output).*$', '', clean_name)
+    
+    if re.match(r'^[A-Za-z0-9]{4,12}$', clean_name):  # Reasonable length for an identifier
+        logger.info(f"Using cleaned filename as NMI identifier: {clean_name}")
+        return clean_name
+    
+    # Fall back to using timestamp + default suffix as last resort
+    if extracted_nmi == "UNKNOWN_NMI":
+        timestamp = datetime.now().strftime('%y%m%d%H%M')
+        extracted_nmi = f"AUTO{timestamp}"
+        logger.info(f"No valid NMI found, using auto-generated NMI: {extracted_nmi}")
+    
+    return extracted_nmi
+
+
+
 
 def main():
     """Main function to process files and generate NEM12 output."""
