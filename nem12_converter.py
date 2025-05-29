@@ -5518,7 +5518,6 @@ def find_agl_data_start(df: pd.DataFrame, logger: logging.Logger) -> Tuple[Optio
         logger.error(f"Error finding AGL data start: {e}")
         return None, {}
 
-
 def infer_agl_columns(df: pd.DataFrame, start_row: int, logger: logging.Logger) -> Dict[str, int]:
     """
     Infer column mapping by analyzing data patterns in AGL format.
@@ -6170,33 +6169,7 @@ def test_agl_detection_on_your_files():
     return is_detected
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+#==================
 
 # ============================================================================
 # TESTING FUNCTION FOR ALL FORMATS
