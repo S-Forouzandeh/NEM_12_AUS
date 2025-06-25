@@ -61,16 +61,16 @@ def save_uploaded_files(uploaded_files):
     return temp_dir, saved_paths
 
 # Function to process files using the converter
-def process_files_streamlit(input_dir, output_dir, logger, separate_files=True):
-    """Process files using the nem12_converter module with Streamlit-specific handling."""
+def process_files_streamlit(input_dir, output_dir, logger):
+    """Process files using the nem12_converter module - separate files only (no header row 100)."""
     try:
-        # Use the process_folder function from your converter
+        # Use the process_folder function from your converter with separate files mode
         success = nc.process_folder(
             folder_path=input_dir,
             output_path=output_dir,
             logger=logger,
-            batch_per_nmi=False,  # We'll handle batching differently
-            separate_files=separate_files
+            batch_per_nmi=False,
+            separate_files=True  # Always separate files, no combine option
         )
         return success
     except Exception as e:
@@ -103,7 +103,7 @@ st.set_page_config(
 st.title("⚡ NEM12 File Converter")
 st.markdown("""
 Upload your CSV, Excel, or text files to convert them to NEM12 format. 
-This app handles various time series data formats and exports valid NEM12 files.
+Each input file will generate one NEM12 output file (header row 100 removed for platform compatibility).
 """)
 
 # Sidebar for configuration
@@ -112,11 +112,7 @@ with st.sidebar:
     
     # Processing options
     st.subheader("Processing Options")
-    separate_files = st.radio(
-        "Output Mode:",
-        ["Separate files (one NEM12 per input file)", "Combined file (all data in one NEM12)"],
-        index=0
-    )
+    st.info("📄 Each input file will generate one NEM12 output file (without header row 100)")
     
     # Advanced options
     with st.expander("Advanced Options"):
@@ -190,18 +186,15 @@ if uploaded_files and st.button("🚀 Convert to NEM12", type="primary"):
         
         temp_output_dir = tempfile.mkdtemp(prefix="nem12_output_")
         
-        # Step 3: Process files
-        status_text.info("⚙️ Processing files...")
+        # Step 3: Process files (separate files mode only)
+        status_text.info("⚙️ Processing files (generating separate NEM12 files)...")
         progress_bar.progress(30)
         
-        separate_mode = "Separate files" in separate_files
-        
-        logger.info(f"Starting processing with separate_files={separate_mode}")
+        logger.info(f"Starting processing in separate files mode (header row 100 will be removed)")
         success = process_files_streamlit(
             input_dir=temp_input_dir,
             output_dir=temp_output_dir,
-            logger=logger,
-            separate_files=separate_mode
+            logger=logger
         )
         
         progress_bar.progress(80)
@@ -285,18 +278,21 @@ with col1:
     st.markdown("### 📖 How to Use")
     st.markdown("""
     1. **Upload Files** - Select your CSV, Excel, or text files
-    2. **Configure Output** - Choose separate or combined mode
-    3. **Convert** - Click the convert button to process
-    4. **Download** - Get your NEM12 files as a ZIP package
+    2. **Convert** - Click the convert button to process (each input = one NEM12 output)
+    3. **Download** - Get your NEM12 files as a ZIP package
+    
+    **Note**: Header rows (record type 100) are automatically removed from output files.
     """)
 
 with col2:
     st.markdown("### 📊 Supported Formats")
     st.markdown("""
     - **Time Series Data** - Date/time + energy readings
-    - **Existing NEM12** - For validation/merging
+    - **Existing NEM12** - For validation/conversion (header removed)
     - **Excel Workbooks** - Multiple sheets supported
     - **Various CSV formats** - Auto-detection
+    
+    **Output**: Valid NEM12 files without header row (100) for platform compatibility.
     """)
 
 # Footer
@@ -304,7 +300,7 @@ st.markdown("---")
 st.markdown(
     """
     <div style='text-align: center; color: #666;'>
-    NEM12 Converter v2.0 | Built with Streamlit
+    NEM12 Converter v2.0 | Built with Streamlit | Header row (100) removed for platform compatibility
     </div>
     """,
     unsafe_allow_html=True
