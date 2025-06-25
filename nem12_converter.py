@@ -2555,10 +2555,9 @@ def merge_nem12_blocks(blocks: List[Dict[str, Any]], logger: logging.Logger) -> 
     logger.info(f"Merged {len(blocks)} blocks into {len(merged_blocks)} distinct blocks")
     return merged_blocks
 
-
 def generate_nem12_file(processed_data: List[Dict[str, Any]], output_path: str, 
                        logger: logging.Logger) -> bool:
-    """Generate NEM12 file from processed data."""
+    """Generate NEM12 file from processed data without header (row 100) - raw text writing."""
     if not processed_data:
         logger.warning("No data to process")
         return False
@@ -2573,12 +2572,21 @@ def generate_nem12_file(processed_data: List[Dict[str, Any]], output_path: str,
         for data in merged_data:
             block = data.get("nem12_block")
             if block and block.is_valid():
-                all_rows.extend(block.get_all_rows())
+                # Get all rows from the block
+                block_rows = block.get_all_rows()
+                
+                # Filter out header rows (record type "100")
+                for row in block_rows:
+                    if row and len(row) > 0:
+                        record_type = str(row[0]).strip()
+                        if record_type != "100":  # Remove header rows
+                            all_rows.append(row)
+                
                 block_count += 1
                 nmi_count += len(block.get_nmis())
 
         if not all_rows:
-            logger.error("No valid data blocks to process")
+            logger.error("No valid data blocks to process after removing headers")
             return False
 
         # Determine output file paths
@@ -2592,15 +2600,19 @@ def generate_nem12_file(processed_data: List[Dict[str, Any]], output_path: str,
 
         dat_file = os.path.splitext(csv_file)[0] + ".dat"
 
-        # Write files
-        df = pd.DataFrame(all_rows)
-        df = df.dropna(axis=1, how="all")
+        # Write files using raw text method (exactly like manual save)
+        def write_nem12_file(file_path):
+            with open(file_path, 'w', encoding='utf-8', newline='') as f:
+                for row in all_rows:
+                    # Convert each row to comma-separated string
+                    row_str = ','.join(str(cell).strip() if cell is not None else '' for cell in row)
+                    f.write(row_str + '\n')
         
-        # Write both CSV and DAT formats
-        df.to_csv(csv_file, index=False, header=False, quoting=1)
-        df.to_csv(dat_file, index=False, header=False, quoting=1)
+        # Write both files
+        write_nem12_file(csv_file)
+        write_nem12_file(dat_file)
 
-        logger.info(f"NEM12 files generated successfully:")
+        logger.info(f"NEM12 files generated successfully (without headers):")
         logger.info(f"   CSV: {csv_file}")
         logger.info(f"   DAT: {dat_file}")
         logger.info(f"   Blocks: {block_count}, NMIs: {nmi_count}, Rows: {len(all_rows)}")
@@ -2610,7 +2622,6 @@ def generate_nem12_file(processed_data: List[Dict[str, Any]], output_path: str,
     except Exception as e:
         logger.error(f"Error generating NEM12 file: {e}")
         return False
-
 
 def validate_nem12_file(file_path: str, logger: logging.Logger) -> bool:
     """Validate generated NEM12 file for compliance."""
