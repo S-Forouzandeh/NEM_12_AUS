@@ -29,8 +29,6 @@ import pandas as pd
 import re
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
-import traceback
-
 
 
 # ============================================================================
@@ -2557,6 +2555,63 @@ def merge_nem12_blocks(blocks: List[Dict[str, Any]], logger: logging.Logger) -> 
     logger.info(f"Merged {len(blocks)} blocks into {len(merged_blocks)} distinct blocks")
     return merged_blocks
 
+
+def generate_nem12_file(processed_data: List[Dict[str, Any]], output_path: str, 
+                       logger: logging.Logger) -> bool:
+    """Generate NEM12 file from processed data."""
+    if not processed_data:
+        logger.warning("No data to process")
+        return False
+
+    try:
+        # Merge blocks if necessary
+        merged_data = merge_nem12_blocks(processed_data, logger)
+        all_rows = []
+        block_count = 0
+        nmi_count = 0
+
+        for data in merged_data:
+            block = data.get("nem12_block")
+            if block and block.is_valid():
+                all_rows.extend(block.get_all_rows())
+                block_count += 1
+                nmi_count += len(block.get_nmis())
+
+        if not all_rows:
+            logger.error("No valid data blocks to process")
+            return False
+
+        # Determine output file paths
+        if os.path.isdir(output_path) or output_path.endswith(os.sep):
+            os.makedirs(output_path, exist_ok=True)
+            base_name = datetime.now().strftime('nem12_%Y%m%d_%H%M%S')
+            csv_file = os.path.join(output_path, f"{base_name}.csv")
+        else:
+            csv_file = output_path
+            os.makedirs(os.path.dirname(os.path.abspath(csv_file)), exist_ok=True)
+
+        dat_file = os.path.splitext(csv_file)[0] + ".dat"
+
+        # Write files
+        df = pd.DataFrame(all_rows)
+        df = df.dropna(axis=1, how="all")
+        
+        # Write both CSV and DAT formats
+        df.to_csv(csv_file, index=False, header=False, quoting=1)
+        df.to_csv(dat_file, index=False, header=False, quoting=1)
+
+        logger.info(f"NEM12 files generated successfully:")
+        logger.info(f"   CSV: {csv_file}")
+        logger.info(f"   DAT: {dat_file}")
+        logger.info(f"   Blocks: {block_count}, NMIs: {nmi_count}, Rows: {len(all_rows)}")
+        
+        return True
+
+    except Exception as e:
+        logger.error(f"Error generating NEM12 file: {e}")
+        return False
+
+
 def validate_nem12_file(file_path: str, logger: logging.Logger) -> bool:
     """Validate generated NEM12 file for compliance."""
     try:
@@ -3781,473 +3836,143 @@ def extract_meter_data_format(df: pd.DataFrame, logger: logging.Logger) -> List[
 # UPDATED process_csv_file FUNCTION
 # Replace your existing process_csv_file function with this enhanced version
 # ============================================================================
-# DIRECT REPLACEMENTS FOR YOUR EXISTING FUNCTIONS
-# Copy-paste these over your existing functions with the SAME NAMES
 
 def process_csv_file(file_path: str, logger: logging.Logger) -> List[Dict[str, Any]]:
     """
-    FIXED VERSION - Replace your existing process_csv_file function with this one.
-    Enhanced with better error handling and fallback processing.
+    ENHANCED VERSION - Now supports the new meter data format
+    Supports ALL formats including:
+    - NEM12 (existing format)
+    - Meter Data Format (NEW: NMI, MeterSerial, Period, Local Time, Data Type, E kWh at Meter, kW, kVA, PF)
+    - AGL DETAILED (retailer export)
+    - SRC CONNECTION POINT (utility format)
+    - Space-separated interval data
+    - Standard interval data
+    - Multi-column energy format
+    - Excel interval format
+    - Interval data format
+    - Time series format
     """
     results = []
     
     try:
-        logger.info(f"🔄 Processing CSV: {os.path.basename(file_path)}")
-        
-        # ENHANCED FILE READING - Try multiple encodings and delimiters
-        df = None
-        read_success = False
-        
-        encodings = ['utf-8', 'utf-8-sig', 'ISO-8859-1', 'cp1252', 'latin1']
-        delimiters = [',', '\t', ';', '|']
-        
-        for encoding in encodings:
-            if read_success:
-                break
-            for delimiter in delimiters:
-                try:
-                    df = pd.read_csv(file_path, delimiter=delimiter, encoding=encoding, 
-                                   header=None, dtype=str, on_bad_lines='skip', 
-                                   low_memory=False, keep_default_na=False)
-                    if df is not None and not df.empty and df.shape[1] > 1:
-                        logger.info(f"✅ Successfully read with encoding={encoding}, delimiter='{delimiter}'")
-                        logger.info(f"📊 DataFrame shape: {df.shape[0]} rows × {df.shape[1]} columns")
-                        read_success = True
-                        break
-                except Exception as e:
-                    logger.debug(f"Failed with encoding={encoding}, delimiter='{delimiter}': {e}")
-                    continue
-        
-        if not read_success or df is None or df.empty:
-            logger.error(f"❌ Could not read CSV file: {file_path}")
-            logger.error("   Tried all common encodings and delimiters")
-            return []
-        
-        # ENHANCED FORMAT DETECTION WITH DETAILED LOGGING
-        format_detected = None
-        extraction_result = None
-        
-        try:
-            # Test 1: NEM12 format
-            if detect_nem12_format(df, logger):
-                format_detected = "NEM12"
-                logger.info("🎯 Detected as NEM12 format")
-                extraction_result = list(extract_nem12_data(df, file_path, logger))
+        with safe_file_processing(file_path, logger):
+            df = read_csv_file(file_path, logger)
+            if df is None:
+                return []
             
-            # Test 2: AGL DETAILED format  
-            elif detect_agl_detailed_format(df, logger):
-                format_detected = "AGL_DETAILED"
-                logger.info("🎯 Detected as AGL DETAILED format")
+            logger.info(f"Processing CSV file: {os.path.basename(file_path)}")
+            logger.info(f"DataFrame shape: {df.shape[0]} rows x {df.shape[1]} columns")
+            
+            # Detect and process format - ENHANCED with new meter data format
+            if detect_nem12_format(df, logger):
+                logger.info("🎯 Processing as existing NEM12 format")
+                results.extend(list(extract_nem12_data(df, file_path, logger)))
+                
+            elif detect_meter_data_format(df, logger):  # NEW METER DATA FORMAT
+                logger.info("🎯 Processing as NEW METER DATA format")
+                time_series_data = extract_meter_data_format(df, logger)
+                if time_series_data:
+                    nmi = time_series_data[0]['nmi']
+                    nem12_block = create_nem12_structure(time_series_data, nmi, logger)
+                    if nem12_block:
+                        results.append(nem12_block)
+                        logger.info("✅ Successfully converted NEW METER DATA to NEM12")
+                
+            elif detect_agl_detailed_format(df, logger):  # AGL FORMAT
+                logger.info("🎯 Processing as AGL DETAILED format")
                 time_series_data = extract_agl_detailed_data(df, logger)
                 if time_series_data:
                     nmi = time_series_data[0]['nmi']
                     nem12_block = create_nem12_structure(time_series_data, nmi, logger)
                     if nem12_block:
-                        extraction_result = [nem12_block]
-            
-            # Test 3: Standard interval format
-            elif detect_standard_interval_format(df, logger):
-                format_detected = "STANDARD_INTERVAL"
-                logger.info("🎯 Detected as Standard Interval format")
-                time_series_data = extract_standard_interval_data(df, logger)
+                        results.append(nem12_block)
+                        logger.info("✅ Successfully converted AGL DETAILED data to NEM12")
+                
+            elif detect_src_connection_point_format(df, logger):  # SRC CONNECTION POINT
+                logger.info("🎯 Processing as SRC CONNECTION POINT format")
+                time_series_data = extract_src_connection_point_data(df, logger)
                 if time_series_data:
                     nmi = time_series_data[0]['nmi']
                     nem12_block = create_nem12_structure(time_series_data, nmi, logger)
                     if nem12_block:
-                        extraction_result = [nem12_block]
-            
-            # Test 4: Space-separated format
-            elif detect_space_separated_format(df, logger):
-                format_detected = "SPACE_SEPARATED"
-                logger.info("🎯 Detected as Space-Separated format")
+                        results.append(nem12_block)
+                        logger.info("✅ Successfully converted SRC CONNECTION POINT data to NEM12")
+                
+            elif detect_space_separated_format(df, logger):  # SPACE SEPARATED
+                logger.info("🎯 Processing as space-separated interval data format")
                 time_series_data = extract_space_separated_data(df, logger)
                 if time_series_data:
                     nmi = time_series_data[0]['nmi']
                     nem12_block = create_nem12_structure(time_series_data, nmi, logger)
                     if nem12_block:
-                        extraction_result = [nem12_block]
-            
-            # Test 5: Multi-column energy format
-            elif detect_multi_column_energy_format(df, logger):
-                format_detected = "MULTI_COLUMN_ENERGY"
-                logger.info("🎯 Detected as Multi-Column Energy format")
+                        results.append(nem12_block)
+                        logger.info("✅ Successfully converted space-separated interval data to NEM12")
+                
+            elif detect_standard_interval_format(df, logger):  # STANDARD INTERVAL
+                logger.info("🎯 Processing as standard interval data format")
+                time_series_data = extract_standard_interval_data(df, logger)
+                if time_series_data:
+                    nmi = time_series_data[0]['nmi']
+                    nem12_block = create_nem12_structure(time_series_data, nmi, logger)
+                    if nem12_block:
+                        results.append(nem12_block)
+                        logger.info("✅ Successfully converted standard interval data to NEM12")
+                
+            elif detect_multi_column_energy_format(df, logger):  # MULTI-COLUMN ENERGY
+                logger.info("🎯 Processing as multi-column energy format")
                 time_series_data = extract_multi_column_energy_data(df, logger)
                 if time_series_data:
                     nmi = time_series_data[0]['nmi']
                     nem12_block = create_nem12_structure(time_series_data, nmi, logger)
                     if nem12_block:
-                        extraction_result = [nem12_block]
-            
-            # FALLBACK: Simple time series extraction
-            else:
-                format_detected = "FALLBACK_TIME_SERIES"
-                logger.warning("⚠️ No specific format detected, trying fallback extraction")
+                        results.append(nem12_block)
+                        logger.info("✅ Successfully converted multi-column energy data to NEM12")
                 
-                # Show first few rows for debugging
-                logger.info("📋 First 5 rows for analysis:")
-                for i in range(min(5, df.shape[0])):
-                    row_preview = [str(x)[:30] for x in df.iloc[i][:8] if pd.notna(x)]
-                    logger.info(f"  Row {i+1}: {row_preview}")
-                
-                # Try fallback extraction
+            elif detect_interval_data_format(df, logger):  # GENERAL INTERVAL DATA
+                logger.info("🎯 Processing as interval data format")
+                time_series_data = extract_interval_data(df, logger)
+                if time_series_data:
+                    nmi = time_series_data[0]['nmi']
+                    nem12_block = create_nem12_structure(time_series_data, nmi, logger)
+                    if nem12_block:
+                        results.append(nem12_block)
+                        logger.info("✅ Successfully converted interval data to NEM12")
+                        
+            elif detect_time_series_format(df, logger):  # TIME SERIES
+                logger.info("🎯 Processing as time series format")
                 nmi = extract_and_validate_nmi(file_path, df, logger)
-                time_series_data = extract_time_series_data_fallback(df, nmi, logger)
+                time_series_data = extract_time_series_data(df, nmi, logger)
                 if time_series_data:
                     nem12_block = create_nem12_structure(time_series_data, nmi, logger)
                     if nem12_block:
-                        extraction_result = [nem12_block]
+                        results.append(nem12_block)
+                        logger.info("✅ Successfully converted time series data to NEM12")
+                        
+            else:
+                logger.warning("❌ Unknown format - attempting fallback time series extraction")
+                nmi = extract_and_validate_nmi(file_path, df, logger)
+                time_series_data = extract_time_series_data(df, nmi, logger)
+                if time_series_data:
+                    nem12_block = create_nem12_structure(time_series_data, nmi, logger)
+                    if nem12_block:
+                        results.append(nem12_block)
+                        logger.info("✅ Successfully converted fallback time series data to NEM12")
+                else:
+                    logger.error("❌ Could not process file - no supported format detected")
+                    # Debug: Show first few rows to help identify format
+                    logger.info("First 5 rows for debugging:")
+                    for i in range(min(5, df.shape[0])):
+                        row_preview = [str(x)[:50] for x in df.iloc[i][:8] if pd.notna(x)]
+                        logger.info(f"  Row {i+1}: {row_preview}")
         
-        except Exception as e:
-            logger.error(f"❌ Error in format detection/extraction: {e}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            extraction_result = None
+        logger.info(f"Completed processing {file_path} with {len(results)} results")
+        return results
         
-        # FINAL RESULT CHECK
-        if extraction_result and len(extraction_result) > 0:
-            logger.info(f"✅ Successfully processed {file_path} using {format_detected}")
-            logger.info(f"   Generated {len(extraction_result)} NEM12 block(s)")
-            return extraction_result
-        else:
-            logger.error(f"❌ Failed to extract any data from {file_path}")
-            logger.error(f"   Format detected: {format_detected}")
-            logger.error(f"   Extraction result: {extraction_result}")
-            return []
-            
     except Exception as e:
-        logger.error(f"❌ Critical error processing {file_path}: {e}")
+        logger.error(f"Error processing CSV file {file_path}: {e}")
+        import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
         return []
-
-
-def extract_time_series_data_fallback(df: pd.DataFrame, nmi: str, logger: logging.Logger) -> List[Dict[str, Any]]:
-    """
-    FALLBACK extraction for difficult files - finds ANY datetime and numeric data.
-    Add this as a NEW function (doesn't replace existing).
-    """
-    time_series_data = []
-    
-    try:
-        logger.info("🔧 Attempting fallback time series extraction...")
-        
-        # STEP 1: Find datetime column (any column with date/time patterns)
-        datetime_col = None
-        datetime_patterns = [
-            r'\d{1,2}/\d{1,2}/\d{4}',  # DD/MM/YYYY or MM/DD/YYYY
-            r'\d{4}-\d{1,2}-\d{1,2}',  # YYYY-MM-DD
-            r'\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}',  # Full datetime
-        ]
-        
-        for col_idx in range(min(15, df.shape[1])):
-            datetime_matches = 0
-            sample_size = min(50, df.shape[0])
-            
-            for row_idx in range(sample_size):
-                cell_value = str(df.iloc[row_idx, col_idx]).strip()
-                for pattern in datetime_patterns:
-                    if re.search(pattern, cell_value):
-                        datetime_matches += 1
-                        break
-            
-            if datetime_matches >= sample_size * 0.3:  # 30% of samples have datetime
-                datetime_col = col_idx
-                logger.info(f"🕐 Found datetime column at position {col_idx+1} ({datetime_matches}/{sample_size} matches)")
-                break
-        
-        # STEP 2: Find numeric column (any column with reasonable energy values)
-        numeric_col = None
-        best_numeric_score = 0
-        
-        for col_idx in range(df.shape[1]):
-            if col_idx == datetime_col:
-                continue
-                
-            numeric_values = []
-            sample_size = min(50, df.shape[0])
-            
-            for row_idx in range(sample_size):
-                cell_value = df.iloc[row_idx, col_idx]
-                if pd.notna(cell_value):
-                    try:
-                        float_val = float(str(cell_value).replace(',', ''))
-                        if 0 <= float_val <= 100000:  # Reasonable energy range
-                            numeric_values.append(float_val)
-                    except:
-                        pass
-            
-            numeric_score = len(numeric_values)
-            if numeric_score > best_numeric_score and numeric_score >= 10:
-                best_numeric_score = numeric_score
-                numeric_col = col_idx
-        
-        if numeric_col is not None:
-            logger.info(f"📊 Found numeric column at position {numeric_col+1} ({best_numeric_score} valid values)")
-        
-        # STEP 3: Extract data if both columns found
-        if datetime_col is None:
-            logger.warning("⚠️ No datetime column found in fallback extraction")
-            return []
-        
-        if numeric_col is None:
-            logger.warning("⚠️ No numeric column found in fallback extraction")
-            return []
-        
-        # STEP 4: Extract time series records
-        for row_idx in range(df.shape[0]):
-            try:
-                # Get datetime
-                datetime_val = str(df.iloc[row_idx, datetime_col]).strip()
-                if not datetime_val or datetime_val.lower() in ['nan', 'none', '']:
-                    continue
-                
-                # Get numeric value
-                numeric_val = df.iloc[row_idx, numeric_col]
-                if pd.isna(numeric_val):
-                    continue
-                
-                # Parse datetime
-                formatted_date = None
-                formatted_time = "1230"  # Default time
-                
-                # Try parsing different datetime formats
-                if ' ' in datetime_val:
-                    # Full datetime
-                    date_part, time_part = datetime_val.split(' ', 1)
-                    formatted_date = parse_date_fallback(date_part)
-                    parsed_time = parse_time_fallback(time_part)
-                    if parsed_time:
-                        formatted_time = parsed_time
-                else:
-                    # Date only
-                    formatted_date = parse_date_fallback(datetime_val)
-                
-                if not formatted_date:
-                    continue
-                
-                # Parse numeric value
-                try:
-                    reading = float(str(numeric_val).replace(',', ''))
-                    if not (0 <= reading <= 100000):
-                        continue
-                except:
-                    continue
-                
-                time_series_data.append({
-                    'nmi': nmi,
-                    'date': formatted_date,
-                    'time': formatted_time,
-                    'reading': f"{reading:.3f}",
-                    'quality': 'A'
-                })
-                
-            except Exception as e:
-                logger.debug(f"Error processing fallback row {row_idx}: {e}")
-                continue
-        
-        logger.info(f"🔧 Fallback extraction: {len(time_series_data)} records extracted")
-        
-        if len(time_series_data) == 0:
-            logger.warning("⚠️ Fallback extraction found no valid data")
-            # Log sample data for debugging
-            logger.info("Sample data from both columns:")
-            for i in range(min(5, df.shape[0])):
-                dt_val = df.iloc[i, datetime_col] if datetime_col is not None else "N/A"
-                num_val = df.iloc[i, numeric_col] if numeric_col is not None else "N/A"
-                logger.info(f"  Row {i+1}: DateTime='{dt_val}', Numeric='{num_val}'")
-        
-        return time_series_data
-        
-    except Exception as e:
-        logger.error(f"Error in fallback extraction: {e}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return []
-
-
-def parse_date_fallback(date_str: str) -> Optional[str]:
-    """
-    FALLBACK date parser - add this as a NEW function.
-    """
-    if not date_str or str(date_str).lower() in ['nan', 'none', '']:
-        return None
-    
-    date_str = str(date_str).strip()
-    
-    # Try various date formats
-    import re
-    patterns = [
-        # DD/MM/YYYY
-        (r'^(\d{1,2})/(\d{1,2})/(\d{4})$', lambda m: f"{m.group(3)}{int(m.group(2)):02d}{int(m.group(1)):02d}"),
-        # MM/DD/YYYY (American format)
-        (r'^(\d{1,2})/(\d{1,2})/(\d{4})$', lambda m: f"{m.group(3)}{int(m.group(1)):02d}{int(m.group(2)):02d}"),
-        # YYYY-MM-DD
-        (r'^(\d{4})-(\d{1,2})-(\d{1,2})$', lambda m: f"{m.group(1)}{int(m.group(2)):02d}{int(m.group(3)):02d}"),
-        # DD-MM-YYYY
-        (r'^(\d{1,2})-(\d{1,2})-(\d{4})$', lambda m: f"{m.group(3)}{int(m.group(2)):02d}{int(m.group(1)):02d}"),
-        # YYYYMMDD
-        (r'^(\d{8})$', lambda m: m.group(1)),
-    ]
-    
-    for pattern, formatter in patterns:
-        match = re.match(pattern, date_str)
-        if match:
-            try:
-                result = formatter(match)
-                # Validate the date
-                year = int(result[:4])
-                month = int(result[4:6])
-                day = int(result[6:8])
-                if 1990 <= year <= 2030 and 1 <= month <= 12 and 1 <= day <= 31:
-                    return result
-            except:
-                continue
-    
-    return None
-
-
-def parse_time_fallback(time_str: str) -> Optional[str]:
-    """
-    FALLBACK time parser - add this as a NEW function.
-    """
-    if not time_str or str(time_str).lower() in ['nan', 'none', '']:
-        return None
-    
-    time_str = str(time_str).strip()
-    
-    # Try various time formats
-    import re
-    patterns = [
-        # HH:MM or H:MM
-        (r'^(\d{1,2}):(\d{2})(?::\d{2})?$', lambda m: f"{int(m.group(1)):02d}{int(m.group(2)):02d}"),
-        # HHMM
-        (r'^(\d{4})$', lambda m: m.group(1)),
-        # H.MM or HH.MM
-        (r'^(\d{1,2})\.(\d{2})$', lambda m: f"{int(m.group(1)):02d}{int(m.group(2)):02d}"),
-    ]
-    
-    for pattern, formatter in patterns:
-        match = re.match(pattern, time_str)
-        if match:
-            try:
-                result = formatter(match)
-                hour = int(result[:2])
-                minute = int(result[2:4])
-                if 0 <= hour <= 23 and 0 <= minute <= 59:
-                    return result
-            except:
-                continue
-    
-    return None
-
-
-def generate_nem12_file(processed_data: List[Dict[str, Any]], output_path: str, 
-                       logger: logging.Logger) -> bool:
-    """
-    FIXED VERSION - Replace your existing generate_nem12_file function with this one.
-    Enhanced error handling and better file generation.
-    """
-    if not processed_data:
-        logger.warning("⚠️ No data to process")
-        return False
-
-    try:
-        logger.info(f"🔨 Generating NEM12 file: {output_path}")
-        
-        # Enhanced data processing
-        all_rows = []
-        block_count = 0
-        nmi_count = 0
-        
-        for data_item in processed_data:
-            try:
-                # Handle different data structures
-                if "nem12_block" in data_item:
-                    # Standard NEM12 block
-                    block = data_item["nem12_block"]
-                    if hasattr(block, 'get_all_rows'):
-                        block_rows = block.get_all_rows()
-                        all_rows.extend(block_rows)
-                        block_count += 1
-                        if hasattr(block, 'get_nmis'):
-                            nmi_count += len(block.get_nmis())
-                
-                elif "nem12_rows" in data_item:
-                    # Simple row structure
-                    block_rows = data_item["nem12_rows"]
-                    all_rows.extend(block_rows)
-                    block_count += 1
-                    nmi_count += 1
-                
-                else:
-                    logger.warning(f"Unknown data structure: {data_item.keys()}")
-                    
-            except Exception as e:
-                logger.warning(f"Error processing data block: {e}")
-                continue
-
-        if not all_rows:
-            logger.error("❌ No valid data blocks found after processing")
-            return False
-
-        logger.info(f"📊 Processed {block_count} blocks, {nmi_count} NMIs, {len(all_rows)} total rows")
-
-        # Ensure output directory exists
-        if os.path.isdir(output_path) or output_path.endswith(os.sep):
-            os.makedirs(output_path, exist_ok=True)
-            base_name = datetime.now().strftime('nem12_%Y%m%d_%H%M%S')
-            csv_file = os.path.join(output_path, f"{base_name}.csv")
-        else:
-            output_dir = os.path.dirname(os.path.abspath(output_path))
-            os.makedirs(output_dir, exist_ok=True)
-            csv_file = output_path
-
-        dat_file = os.path.splitext(csv_file)[0] + ".dat"
-
-        # Enhanced file writing with better error handling
-        def write_nem12_file(file_path):
-            try:
-                with open(file_path, 'w', encoding='utf-8', newline='') as f:
-                    for row_idx, row in enumerate(all_rows):
-                        try:
-                            # Convert row to comma-separated string
-                            if isinstance(row, list):
-                                row_str = ','.join(str(cell).strip() if cell is not None else '' for cell in row)
-                            else:
-                                row_str = str(row)
-                            
-                            f.write(row_str + '\n')
-                            
-                        except Exception as e:
-                            logger.warning(f"Error writing row {row_idx}: {e}")
-                            # Skip problematic rows but continue
-                            continue
-                            
-                logger.info(f"✅ Successfully wrote: {file_path}")
-                return True
-                
-            except Exception as e:
-                logger.error(f"❌ Error writing file {file_path}: {e}")
-                return False
-
-        # Write both CSV and DAT files
-        csv_success = write_nem12_file(csv_file)
-        dat_success = write_nem12_file(dat_file)
-
-        if csv_success or dat_success:
-            logger.info(f"✅ NEM12 file generation completed:")
-            if csv_success:
-                logger.info(f"   📄 CSV: {csv_file}")
-            if dat_success:
-                logger.info(f"   📄 DAT: {dat_file}")
-            logger.info(f"   📊 Stats: {block_count} blocks, {nmi_count} NMIs, {len(all_rows)} rows")
-            return True
-        else:
-            logger.error("❌ Failed to write any output files")
-            return False
-
-    except Exception as e:
-        logger.error(f"❌ Critical error generating NEM12 file: {e}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return False
-
 
 
 # ============================================================================
