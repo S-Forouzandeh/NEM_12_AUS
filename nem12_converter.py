@@ -242,7 +242,7 @@ class StreamlitNEM12Converter:
             return False
 
     def convert_excel_nem12_row_format(self, file_content, filename):
-        """Convert Excel NEM12 row format"""
+        """Convert Excel NEM12 row format - Enhanced to match original logic"""
         try:
             logger.info(f"Converting Excel NEM12 row format: {filename}")
             
@@ -303,6 +303,107 @@ class StreamlitNEM12Converter:
             
         except Exception as e:
             logger.error(f"Error converting Excel NEM12 row format: {str(e)}")
+            return None
+
+    def convert_excel_format(self, file_content, filename):
+        """Convert Excel file with date and interval data - Enhanced to match original"""
+        try:
+            # Try reading first sheet
+            df = pd.read_excel(io.BytesIO(file_content), sheet_name=0, header=None)
+            
+            # Check if it's already in NEM12-like format with 200/300 records
+            if len(df.columns) > 2 and (df.iloc[0, 0] == 200 or df.iloc[0, 0] == "200"):
+                return self.convert_existing_nem12_excel(df)
+            
+            # Try with headers for time-series format
+            df = pd.read_excel(io.BytesIO(file_content), sheet_name=0)
+            
+            # Check if it's time-series format
+            has_datetime_col = any(any(keyword in str(col).lower() for keyword in 
+                                     ['readingdatetime', 'read_datetime', 'datetime', 'timestamp', 'read datetime', 'endtime', 'local time']) 
+                                 for col in df.columns)
+            has_power_col = any(any(keyword in str(col).lower() for keyword in 
+                                  ['e (usage kwh)', 'kwh value', 'kwh', 'e kwh at meter', 'net kwh', 'kw', 'power']) and 
+                              not any(exclude in str(col).lower() for exclude in 
+                                     ['serial', 'nmi', 'id', 'identifier', 'point'])
+                              for col in df.columns)
+            
+            if has_datetime_col and has_power_col:
+                logger.info(f"Detected time-series format in Excel file")
+                return self.convert_timeseries_excel(df)
+            
+            # Regular format processing
+            date_col = None
+            for col in df.columns:
+                if any(keyword in str(col).lower() for keyword in ['date', 'time', 'day', 'timestamp']):
+                    date_col = col
+                    break
+            
+            if date_col is None:
+                date_col = df.columns[0]  # Use first column as date
+            
+            data_dict = {}
+            for _, row in df.iterrows():
+                try:
+                    date_obj = pd.to_datetime(row[date_col])
+                    date_str = self._format_date_yyyymmdd(date_obj)
+                    
+                    # Extract numerical values (skip date column)
+                    values = []
+                    for col in df.columns:
+                        if col != date_col:
+                            val = row[col] if pd.notna(row[col]) else 0
+                            try:
+                                values.append(float(val))
+                            except:
+                                values.append(0.0)
+                    
+                    # Ensure 48 intervals
+                    while len(values) < 48:
+                        values.append(0.0)
+                    
+                    data_dict[date_str] = values[:48]
+                    
+                except Exception as e:
+                    logger.warning(f"Skipping row due to error: {str(e)}")
+                    continue
+            
+            return data_dict
+            
+        except Exception as e:
+            logger.error(f"Error converting Excel format: {str(e)}")
+            return None
+    
+    def convert_existing_nem12_excel(self, df):
+        """Convert existing NEM12-like Excel format"""
+        try:
+            data_dict = {}
+            
+            for _, row in df.iterrows():
+                if len(row) > 2 and (row.iloc[0] == 300 or row.iloc[0] == "300"):
+                    try:
+                        date_str = str(int(float(row.iloc[1])))
+                        values = []
+                        
+                        # Extract values from columns 2 onwards (up to 48 values)
+                        for i in range(2, min(50, len(row))):
+                            val = row.iloc[i] if pd.notna(row.iloc[i]) else 0
+                            values.append(float(val))
+                        
+                        # Ensure 48 intervals
+                        while len(values) < 48:
+                            values.append(0.0)
+                        
+                        data_dict[date_str] = values[:48]
+                        
+                    except Exception as e:
+                        logger.warning(f"Skipping row due to error: {str(e)}")
+                        continue
+            
+            return data_dict
+            
+        except Exception as e:
+            logger.error(f"Error converting existing NEM12 Excel format: {str(e)}")
             return None
     
     def convert_timeseries_format(self, file_content, filename):
@@ -590,7 +691,7 @@ class StreamlitNEM12Converter:
             return None
 
     def detect_and_convert_file(self, file_content, filename):
-        """Enhanced detection with all format handlers"""
+        """Enhanced detection with all format handlers - Match original priorities"""
         file_ext = Path(filename).suffix.lower()
         
         # Priority 1: Check for Input_1 horizontal NEM12 format
@@ -598,7 +699,7 @@ class StreamlitNEM12Converter:
             logger.info(f"Using Input_1 horizontal NEM12 handler for {filename}")
             return self.convert_input1_horizontal_nem12_format(file_content, filename)
         
-        # Priority 2: Check for Excel NEM12 row format
+        # Priority 2: Check for Excel NEM12 row format (Input_4, Input_6, Input_7 style)
         if file_ext in ['.xlsx', '.xls'] and self.detect_excel_nem12_row_format(file_content, filename):
             logger.info(f"Using Excel NEM12 row format handler for {filename}")
             return self.convert_excel_nem12_row_format(file_content, filename)
@@ -609,7 +710,7 @@ class StreamlitNEM12Converter:
                 first_line = file_content.decode('utf-8').split('\n')[0].strip()
                 if first_line.startswith('100,NEM12') or first_line.startswith('200,'):
                     logger.info(f"Detected existing NEM12 CSV format in {filename}")
-                    return self.convert_csv_format2(file_content, filename)  # Will handle existing format
+                    return self.convert_csv_format2(file_content, filename)
             except:
                 pass
         
@@ -618,7 +719,7 @@ class StreamlitNEM12Converter:
             logger.info(f"Using interval energy format handler for {filename}")
             return self.convert_interval_energy_format(file_content, filename)
         
-        # Priority 5: Check for time-series format
+        # Priority 5: Check for time-series format (CSV)
         if file_ext in ['.csv']:
             try:
                 df_sample = pd.read_csv(io.BytesIO(file_content), nrows=10)
@@ -643,9 +744,20 @@ class StreamlitNEM12Converter:
             except Exception as e:
                 logger.warning(f"Error detecting time-series format: {str(e)}")
         
-        # Priority 6: Excel files
+        # Priority 6: Excel files (enhanced detection)
         if file_ext in ['.xlsx', '.xls']:
             try:
+                # First check for NEM12-like format without headers
+                df_noheader = pd.read_excel(io.BytesIO(file_content), header=None, nrows=5)
+                
+                # Check if first column contains 200/300 records (existing NEM12)
+                has_200_300_records = any(str(val) in ['200', '300'] or val in [200, 300] for val in df_noheader.iloc[:, 0])
+                
+                if has_200_300_records:
+                    logger.info(f"Detected existing NEM12 Excel format in {filename}")
+                    return self.convert_excel_format(file_content, filename)
+                
+                # Check for time-series format with headers
                 df_sample = pd.read_excel(io.BytesIO(file_content), nrows=10)
                 
                 has_datetime_col = any(any(keyword in str(col).lower() for keyword in 
@@ -659,10 +771,14 @@ class StreamlitNEM12Converter:
                 
                 if has_datetime_col and has_power_col:
                     logger.info(f"Detected time-series format in Excel file {filename}")
-                    return self.convert_excel_nem12_row_format(file_content, filename)
+                    return self.convert_excel_format(file_content, filename)
+                
+                # Regular Excel format (date + interval columns)
+                logger.info(f"Detected regular Excel format in {filename}")
+                return self.convert_excel_format(file_content, filename)
                     
             except Exception as e:
-                logger.warning(f"Error detecting Excel time-series format: {str(e)}")
+                logger.warning(f"Error detecting Excel format: {str(e)}")
         
         # Default fallback
         logger.info(f"Converting {filename} using fallback method")
