@@ -1,16 +1,3 @@
-#!/usr/bin/env python3
-"""
-NEM12 Converter Module 
-=====================================================
-
-A comprehensive tool for converting CSV/Excel files to NEM12 format with support for:
-- Multiple input formats (CSV, Excel)
-- Time series data conversion
-- Existing NEM12 file processing and validation
-- Interval data format detection
-- Batch processing capabilities
-
-
 
 import os
 import pandas as pd
