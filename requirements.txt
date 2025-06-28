@@ -1,7 +1,22 @@
-streamlit==1.32.0
+# Core Streamlit and web framework
+streamlit>=1.39.0
+
+# Data processing and analysis
 pandas>=2.1.0
 numpy>=1.26.0
-openpyxl==3.1.2
-xlrd==2.0.1
+
+# Excel file handling
+openpyxl>=3.1.5
+xlrd>=2.0.1
+
+# Date/time handling (usually included with pandas but explicit for safety)
 python-dateutil>=2.8.0
 pytz>=2023.3
+
+# Optional: Performance improvements (uncomment if needed)
+# fastparquet>=2023.10.0  # For better parquet support
+# pyarrow>=14.0.0  # For better performance with large datasets
+
+# Optional: Additional file format support (uncomment if needed)
+# xlsxwriter>=3.1.0  # For advanced Excel writing features
+# openpyxl[styles]>=3.1.5  # For Excel styling support
