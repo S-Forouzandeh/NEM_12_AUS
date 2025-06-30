@@ -984,6 +984,197 @@ class NEM12Converter:
             logger.error(f"Error converting interval energy format {file_path}: {str(e)}")
             return None
 
+    def detect_agl_detailed_format(self, file_path):
+        """Detect AGL DETAILED format with Site Identifier, Meter Type, Read Date Time, etc."""
+        try:
+            if file_path.suffix.lower() not in ['.xlsx', '.xls', '.csv']:
+                return False
+            
+            # Read sample data
+            if file_path.suffix.lower() == '.csv':
+                df_sample = pd.read_csv(file_path, nrows=10)
+            else:
+                df_sample = pd.read_excel(file_path, nrows=10)
+            
+            # Check for AGL DETAILED format indicators
+            columns = [str(col).strip() for col in df_sample.columns]
+            logger.info(f"Checking AGL format - columns: {columns}")
+            
+            # Key indicators for AGL DETAILED format
+            has_site_identifier = any('site' in col.lower() and 'identifier' in col.lower() for col in columns)
+            has_meter_type = any('meter' in col.lower() and 'type' in col.lower() for col in columns)
+            has_read_date_time = any('read' in col.lower() and ('date' in col.lower() or 'time' in col.lower()) for col in columns)
+            has_kwh_column = any('kwh' in col.lower() for col in columns)
+            has_data_type = any('data' in col.lower() and 'type' in col.lower() for col in columns)
+            
+            # Additional check - look for NSA_LV pattern in data
+            has_nsa_pattern = False
+            if not df_sample.empty and len(df_sample.columns) > 1:
+                first_col_data = df_sample.iloc[:, 1].astype(str).str.lower()
+                has_nsa_pattern = any('nsa' in val for val in first_col_data)
+            
+            is_agl_detailed = (has_site_identifier or has_nsa_pattern) and has_read_date_time and has_kwh_column
+            
+            if is_agl_detailed:
+                logger.info(f"✅ Detected AGL DETAILED format in {file_path.name}")
+                logger.info(f"  Site ID: {has_site_identifier}, NSA Pattern: {has_nsa_pattern}")
+                logger.info(f"  Read DateTime: {has_read_date_time}, kWh: {has_kwh_column}")
+            
+            return is_agl_detailed
+            
+        except Exception as e:
+            logger.warning(f"Error detecting AGL DETAILED format: {str(e)}")
+            return False
+
+    def convert_agl_detailed_format(self, file_path):
+        """Convert AGL DETAILED format to NEM12"""
+        try:
+            logger.info(f"Converting AGL DETAILED format: {file_path.name}")
+            
+            # Read the file
+            if file_path.suffix.lower() == '.csv':
+                df = pd.read_csv(file_path)
+            else:
+                df = pd.read_excel(file_path)
+            
+            logger.info(f"Loaded {len(df)} rows with columns: {list(df.columns)}")
+            
+            # Find the relevant columns
+            datetime_col = None
+            kwh_col = None
+            
+            # Look for datetime column (Read Date Time, Date Time, etc.)
+            datetime_keywords = ['read date time', 'date time', 'datetime', 'read_date_time', 'timestamp']
+            for keyword in datetime_keywords:
+                for col in df.columns:
+                    if keyword.replace(' ', '').lower() in str(col).replace(' ', '').lower():
+                        datetime_col = col
+                        logger.info(f"Found datetime column: '{col}'")
+                        break
+                if datetime_col:
+                    break
+            
+            # Look for kWh column
+            kwh_keywords = ['kwh', 'kw h', 'energy']
+            for keyword in kwh_keywords:
+                for col in df.columns:
+                    col_lower = str(col).lower().strip()
+                    if keyword in col_lower and not any(exclude in col_lower for exclude in 
+                        ['site', 'meter', 'type', 'identifier', 'date', 'time']):
+                        kwh_col = col
+                        logger.info(f"Found kWh column: '{col}'")
+                        break
+                if kwh_col:
+                    break
+            
+            # If specific columns not found, use positional detection
+            if datetime_col is None:
+                # Try columns C, D, E (common positions for datetime in AGL format)
+                for col_idx in [2, 3, 4]:  # 0-based indexing for columns C, D, E
+                    if col_idx < len(df.columns):
+                        col_name = df.columns[col_idx]
+                        # Check if this column contains datetime-like data
+                        sample_val = str(df.iloc[0, col_idx]) if not df.empty else ""
+                        if any(char in sample_val for char in ['/', ':', '-']) and len(sample_val) > 8:
+                            datetime_col = col_name
+                            logger.info(f"Found datetime column by position: '{col_name}' (column {col_idx+1})")
+                            break
+            
+            if kwh_col is None:
+                # Look for numeric columns that could be energy (columns F, G, H, etc.)
+                for col_idx in range(5, min(12, len(df.columns))):  # Check columns F onwards
+                    col_name = df.columns[col_idx]
+                    try:
+                        # Check if column contains numeric data
+                        numeric_data = pd.to_numeric(df.iloc[:, col_idx], errors='coerce')
+                        if not numeric_data.isna().all() and numeric_data.max() > 0:
+                            kwh_col = col_name
+                            logger.info(f"Found numeric column by position: '{col_name}' (column {col_idx+1})")
+                            break
+                    except:
+                        continue
+            
+            if datetime_col is None or kwh_col is None:
+                logger.error(f"Could not find required columns. DateTime: {datetime_col}, kWh: {kwh_col}")
+                logger.info("Available columns: " + ", ".join([f"{i+1}={col}" for i, col in enumerate(df.columns)]))
+                return None
+            
+            logger.info(f"Using datetime column: '{datetime_col}', kWh column: '{kwh_col}'")
+            
+            # Parse datetime
+            df['datetime_parsed'] = pd.to_datetime(df[datetime_col], errors='coerce')
+            
+            # Remove rows with invalid dates
+            before_count = len(df)
+            df = df.dropna(subset=['datetime_parsed'])
+            after_count = len(df)
+            
+            if before_count != after_count:
+                logger.warning(f"Removed {before_count - after_count} rows with invalid dates")
+            
+            if df.empty:
+                logger.error("No valid dates found in the data")
+                return None
+            
+            # Extract date and time components
+            df['date'] = df['datetime_parsed'].dt.date
+            df['hour'] = df['datetime_parsed'].dt.hour
+            df['minute'] = df['datetime_parsed'].dt.minute
+            
+            # Convert to 30-minute interval index (0-47)
+            df['interval_index'] = df['hour'] * 2 + (df['minute'] // 30)
+            
+            # Clean kWh values
+            df[kwh_col] = pd.to_numeric(df[kwh_col], errors='coerce').fillna(0)
+            
+            logger.info(f"Sample kWh values: {df[kwh_col].head(5).tolist()}")
+            logger.info(f"kWh range: {df[kwh_col].min():.3f} to {df[kwh_col].max():.3f}")
+            
+            data_dict = {}
+            
+            # Group by date and build daily interval data
+            for date, group in df.groupby('date'):
+                date_str = date.strftime("%Y%m%d")
+                
+                # Initialize 48 intervals with zeros
+                intervals = [0.0] * 48
+                
+                # Fill intervals with kWh values (use directly - already energy!)
+                for _, row in group.iterrows():
+                    interval_idx = int(row['interval_index'])
+                    kwh_value = row[kwh_col]
+                    
+                    # Ensure interval index is valid
+                    if 0 <= interval_idx < 48:
+                        intervals[interval_idx] = float(kwh_value)
+                
+                # Only add if we have some non-zero data
+                if any(val > 0 for val in intervals):
+                    data_dict[date_str] = intervals
+                    daily_total = sum(intervals)
+                    logger.debug(f"Date {date_str}: {len(group)} readings, daily total: {daily_total:.1f} kWh")
+            
+            logger.info(f"Converted {len(data_dict)} days from AGL DETAILED format")
+            
+            # Log conversion statistics
+            if data_dict:
+                total_energy = sum(sum(day_data) for day_data in data_dict.values())
+                avg_daily_energy = total_energy / len(data_dict)
+                logger.info(f"Total energy: {total_energy:.1f} kWh, Average daily: {avg_daily_energy:.1f} kWh")
+                
+                # Sample of converted data
+                sample_date = list(data_dict.keys())[0]
+                sample_intervals = data_dict[sample_date]
+                logger.info(f"Sample day {sample_date}: first 4 intervals = {sample_intervals[:4]}")
+            
+            return data_dict
+            
+        except Exception as e:
+            logger.error(f"Error converting AGL DETAILED format {file_path}: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return None
+
     def detect_and_convert_file(self, file_path):
         """Enhanced detection with all format handlers - CORRECTED PRIORITIES"""
         file_ext = file_path.suffix.lower()
@@ -998,7 +1189,12 @@ class NEM12Converter:
             logger.info(f"Using Excel NEM12 row format handler for {file_path.name}")
             return self.convert_excel_nem12_row_format(file_path)
         
-        # PRIORITY 3: Try to detect existing NEM12 format
+        # PRIORITY 3: Check for AGL DETAILED format (NEW!)
+        if self.detect_agl_detailed_format(file_path):
+            logger.info(f"Using AGL DETAILED format handler for {file_path.name}")
+            return self.convert_agl_detailed_format(file_path)
+        
+        # PRIORITY 4: Try to detect existing NEM12 format
         if file_ext in ['.csv', '.txt']:
             try:
                 with open(file_path, 'r') as f:
@@ -1009,12 +1205,12 @@ class NEM12Converter:
             except:
                 pass
         
-        # PRIORITY 4: Check for interval energy format (NEW!)
+        # PRIORITY 5: Check for interval energy format
         if file_ext in ['.csv'] and self.detect_interval_energy_format(file_path):
             logger.info(f"Using interval energy format handler for {file_path.name}")
             return self.convert_interval_energy_format(file_path)
         
-        # PRIORITY 5: Check if it's time-series format (multiple timestamps)
+        # PRIORITY 6: Check if it's time-series format (multiple timestamps)
         if file_ext in ['.csv']:
             try:
                 df_sample = pd.read_csv(file_path, nrows=10)
@@ -1040,7 +1236,7 @@ class NEM12Converter:
             except Exception as e:
                 logger.warning(f"Error detecting time-series format: {str(e)}")
         
-        # PRIORITY 6: Check Excel files for time-series format
+        # PRIORITY 7: Check Excel files for time-series format
         if file_ext in ['.xlsx', '.xls']:
             try:
                 df_sample = pd.read_excel(file_path, nrows=10)
@@ -1061,7 +1257,7 @@ class NEM12Converter:
             except Exception as e:
                 logger.warning(f"Error detecting Excel time-series format: {str(e)}")
         
-        # PRIORITY 7: Extension-based detection (fallback)
+        # PRIORITY 8: Extension-based detection (fallback)
         conversion_map = {
             '.csv': self.convert_csv_format2,
             '.xlsx': self.convert_excel_format,
