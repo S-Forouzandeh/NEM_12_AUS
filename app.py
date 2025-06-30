@@ -11,6 +11,7 @@ import sys
 import traceback
 from pathlib import Path
 import re
+import nem12_converter as nc
 
 # Add the current directory to Python path to import nem12_converter
 sys.path.append(os.path.dirname(__file__))
