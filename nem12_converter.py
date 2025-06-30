@@ -41,7 +41,7 @@ class NEM12Converter:
         """Format date as YYYYMMDD"""
         return date_obj.strftime("%Y%m%d")
     
-    def _write_nem12_file(self, data_dict, output_file, nmi_number=None, suffix=None):
+    def _write_nem12_file(self, data_dict, output_file, nmi_number=None, suffix=None, skip_header=False):
         """Write data in proper NEM12 standard format"""
         try:
             # Use defaults if not provided
@@ -51,15 +51,16 @@ class NEM12Converter:
             with open(output_file, 'w', newline='') as f:
                 writer = csv.writer(f, quoting=csv.QUOTE_NONE, escapechar='\\')
                 
-                # 100 Record - NEM12 Header
-                header_100 = [
-                    "100",
-                    self.version_header,
-                    self.creation_date,
-                    self.from_participant,
-                    self.to_participant
-                ]
-                writer.writerow(header_100)
+                # 100 Record - NEM12 Header (skip if requested for platform compatibility)
+                if not skip_header:
+                    header_100 = [
+                        "100",
+                        self.version_header,
+                        self.creation_date,
+                        self.from_participant,
+                        self.to_participant
+                    ]
+                    writer.writerow(header_100)
                 
                 # 200 Record - NMI Data Details
                 record_200 = [
@@ -1108,6 +1109,111 @@ class NEM12Converter:
                     logger.error(f"Error processing {file_path.name}: {str(e)}")
         
         logger.info(f"Processing complete. Success: {processed_count}, Errors: {error_count}")
+
+# STREAMLIT COMPATIBILITY FUNCTIONS
+def process_folder(folder_path, output_path, logger, batch_per_nmi=False, separate_files=True):
+    """
+    Process folder function for Streamlit compatibility
+    This is the function that app.py expects to call
+    """
+    try:
+        logger.info(f"Processing folder: {folder_path} -> {output_path}")
+        
+        # Create NEM12Converter instance with custom paths
+        converter = NEM12Converter(input_dir=folder_path, output_dir=output_path)
+        
+        # Process all files in the input directory
+        folder_path = Path(folder_path)
+        output_path = Path(output_path)
+        
+        if not folder_path.exists():
+            logger.error(f"Input folder does not exist: {folder_path}")
+            return False
+        
+        processed_count = 0
+        error_count = 0
+        
+        for file_path in folder_path.iterdir():
+            if file_path.is_file():
+                logger.info(f"Processing file: {file_path.name}")
+                
+                try:
+                    # Convert file to data dictionary
+                    data_dict = converter.detect_and_convert_file(file_path)
+                    
+                    if data_dict and len(data_dict) > 0:
+                        # Generate output filename
+                        output_filename = f"{file_path.stem}_NEM12.csv"
+                        output_file_path = output_path / output_filename
+                        
+                        # Write NEM12 file (skip header row 100 for platform compatibility)
+                        if converter._write_nem12_file(data_dict, output_file_path, skip_header=True):
+                            processed_count += 1
+                            logger.info(f"Successfully converted: {file_path.name} -> {output_filename}")
+                        else:
+                            error_count += 1
+                            logger.error(f"Failed to write output file: {output_filename}")
+                    else:
+                        error_count += 1
+                        logger.error(f"No valid data found in: {file_path.name}")
+                        
+                except Exception as e:
+                    error_count += 1
+                    logger.error(f"Error processing {file_path.name}: {str(e)}")
+        
+        logger.info(f"Folder processing complete. Success: {processed_count}, Errors: {error_count}")
+        return processed_count > 0
+        
+    except Exception as e:
+        logger.error(f"Error in process_folder: {str(e)}")
+        return False
+
+def validate_nem12_file(file_path, logger):
+    """
+    Validate NEM12 file function for Streamlit compatibility
+    """
+    try:
+        if not os.path.exists(file_path):
+            logger.error(f"File does not exist: {file_path}")
+            return False
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        if not lines:
+            logger.error("File is empty")
+            return False
+
+        # Basic validation
+        first_line = lines[0].strip()
+        first_record_type = first_line.split(',')[0] if ',' in first_line else first_line
+        
+        # Check if it starts with 200 (header 100 removed) or 100 (full NEM12)
+        valid_start = first_record_type in ["100", "200"]
+        
+        # Check end
+        last_line = lines[-1].strip()
+        last_record_type = last_line.split(',')[0] if ',' in last_line else last_line
+        valid_end = last_record_type == "900"
+        
+        # Count record types
+        has_200_records = any(line.strip().startswith("200,") for line in lines)
+        has_300_records = any(line.strip().startswith("300,") for line in lines)
+        
+        is_valid = valid_start and valid_end and has_200_records and has_300_records
+        
+        if is_valid:
+            logger.info(f"✅ NEM12 validation passed for {file_path}")
+        else:
+            logger.warning(f"⚠️ NEM12 validation issues for {file_path}")
+            logger.warning(f"  Valid start: {valid_start}, Valid end: {valid_end}")
+            logger.warning(f"  Has 200 records: {has_200_records}, Has 300 records: {has_300_records}")
+        
+        return is_valid
+        
+    except Exception as e:
+        logger.error(f"Error validating NEM12 file {file_path}: {str(e)}")
+        return False
 
 def main():
     """Main execution function"""
